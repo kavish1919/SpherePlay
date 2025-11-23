@@ -98,9 +98,10 @@ const getFirebaseConfig = () => {
 };
 
 const firebaseConfig = getFirebaseConfig();
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+// Prevent app crash if keys are missing in preview
+const app = firebaseConfig.apiKey === "CONFIG_MISSING" ? undefined : initializeApp(firebaseConfig);
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
 
 // --- THEME CONFIGURATION ---
 const THEMES = {
@@ -127,8 +128,12 @@ export default function App() {
   const [playerName, setPlayerName] = useState('');
   const [playerColor, setPlayerColor] = useState('blue');
 
+  // REF to track if "I" clicked the abandon button
+  const isAbandoning = useRef(false);
+
   // 1. Auth
   useEffect(() => {
+    if (!auth) return;
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -150,16 +155,24 @@ export default function App() {
 
   // 2. Game Listener
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || !db) return;
     const unsubscribe = onSnapshot(doc(db, 'games', roomId), (snap) => {
       if (snap.exists()) {
         setGame(snap.data());
       } else { 
+        // Doc deleted (Game Over)
         setGame(null);
         setRoomId('');
         setView('lobby');
         playSound('lose'); 
-        setError("Room Closed. Opponent left."); 
+        
+        // Check if I was the one who abandoned
+        if (isAbandoning.current) {
+          setError("You left the room.");
+          isAbandoning.current = false; // Reset
+        } else {
+          setError("Room Closed. Opponent left."); 
+        }
       }
     });
     return () => unsubscribe();
@@ -191,6 +204,27 @@ export default function App() {
     }
   }, [error]);
 
+  // 5. Handle Browser Back Button (NEW)
+  useEffect(() => {
+    if (view === 'game') {
+      // Push a state so the back button has something to "undo"
+      window.history.pushState(null, document.title, window.location.href);
+      
+      const handlePopState = (event) => {
+        if (roomId && db) {
+          isAbandoning.current = true; // Mark as self-abandoning
+          deleteDoc(doc(db, 'games', roomId)).catch(console.error);
+        }
+      };
+
+      window.addEventListener('popstate', handlePopState);
+
+      return () => {
+        window.removeEventListener('popstate', handlePopState);
+      };
+    }
+  }, [view, roomId]);
+
   // --- Actions ---
 
   const handleCopy = () => {
@@ -201,7 +235,7 @@ export default function App() {
   };
 
   const createGame = async () => {
-    if (!user) return;
+    if (!user || !db) return;
     playSound('click');
     setLoading(true);
     const newId = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -245,7 +279,7 @@ export default function App() {
   };
 
   const joinGame = async () => {
-    if (!user || !joinId) return;
+    if (!user || !joinId || !db) return;
     playSound('click');
     setLoading(true);
     const id = joinId.toUpperCase();
@@ -276,6 +310,7 @@ export default function App() {
 
   const abandonGame = async () => {
     playSound('click');
+    isAbandoning.current = true; // Mark that I am the one leaving
     try { await deleteDoc(doc(db, 'games', roomId)); } catch (err) { console.error(err); }
   };
 
@@ -415,6 +450,20 @@ export default function App() {
   };
   const getRematchState = () => game?.rematch || { host: false, guest: false };
 
+  const getWinnerText = () => {
+    if (!game?.winner) return '';
+    if (game.winner === 'Draw') return "IT'S A DRAW!";
+    
+    const isHost = user.uid === game.host;
+    let iWon = false;
+    if (game.type === 'tictactoe') {
+      iWon = (game.winner === 'X' && isHost) || (game.winner === 'O' && !isHost);
+    } else {
+      iWon = (game.winner === 'Host' && isHost) || (game.winner === 'Guest' && !isHost);
+    }
+    return iWon ? "YOU WON! 🎉" : "YOU LOST 💀";
+  };
+
   if (!user) return <div className="h-screen flex items-center justify-center bg-white"><Loader2 className="animate-spin text-indigo-600 w-12 h-12"/></div>;
 
   if (view === 'game' && !game) return <div className="h-screen flex flex-col items-center justify-center bg-white gap-4 animate-pulse"><Loader2 className="animate-spin text-indigo-600 w-10 h-10"/><p className="text-slate-500 font-bold text-lg">Entering Arena...</p></div>;
@@ -488,9 +537,19 @@ export default function App() {
               <button onClick={createGame} disabled={loading} className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-xl shadow-indigo-200 hover:shadow-2xl hover:bg-indigo-700 active:scale-95 transition-all duration-300 flex items-center justify-center gap-2 group">
                 {loading ? <Loader2 className="animate-spin"/> : <><Gamepad2 className="group-hover:rotate-12 transition-transform"/> Create Game Room</>}
               </button>
-              <div className="flex gap-3">
-                <input value={joinId} onChange={e => setJoinId(e.target.value)} placeholder="ENTER ROOM ID" className="flex-1 p-4 border-2 border-slate-200 rounded-xl font-mono uppercase text-center font-bold text-lg focus:border-emerald-500 outline-none transition-all duration-300 bg-slate-50 focus:bg-white focus:shadow-lg focus:scale-[1.02]"/>
-                <button onClick={joinGame} className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 rounded-xl font-bold shadow-lg shadow-emerald-200 transition-all duration-300 active:scale-95 hover:shadow-xl hover:-translate-y-1">Join</button>
+              <div className="flex gap-3 justify-center">
+                <input 
+                  value={joinId} 
+                  onChange={e => setJoinId(e.target.value)} 
+                  placeholder="ENTER ROOM ID" 
+                  className="w-44 sm:w-auto sm:flex-1 p-3 sm:p-4 border-2 border-slate-200 rounded-xl font-mono uppercase text-center font-bold text-base sm:text-lg focus:border-emerald-500 outline-none transition-all duration-300 bg-slate-50 focus:bg-white focus:shadow-lg focus:scale-[1.02]"
+                />
+                <button 
+                  onClick={joinGame} 
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 rounded-xl font-bold shadow-lg shadow-emerald-200 transition-all duration-300 active:scale-95 hover:shadow-xl hover:-translate-y-1 whitespace-nowrap"
+                >
+                  Join
+                </button>
               </div>
             </div>
           </div>
@@ -523,7 +582,7 @@ export default function App() {
                  {game.winner && (
                    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 backdrop-blur-sm rounded-xl animate-in fade-in duration-500">
                      <div className="bg-white p-8 rounded-2xl text-center animate-in zoom-in duration-300 shadow-2xl mx-4">
-                       <h2 className="text-2xl sm:text-3xl font-black text-slate-800 mb-2 animate-bounce">{game.winner === 'Draw' ? "IT'S A DRAW!" : `${game.winner === 'Host' ? game.hostName : game.guestName} WINS!`}</h2>
+                       <h2 className="text-2xl sm:text-3xl font-black text-slate-800 mb-2 animate-bounce">{getWinnerText()}</h2>
                        <div className="mt-6 space-y-3">
                          {getRematchState()[user.uid === game.host ? 'host' : 'guest'] ? <div className="text-indigo-600 font-bold animate-pulse">Waiting for opponent...</div> : <button onClick={handleRematch} className="w-full px-8 py-3 bg-emerald-500 text-white rounded-xl font-bold text-sm hover:bg-emerald-600 transition-transform hover:scale-105 active:scale-95 flex items-center justify-center gap-2 shadow-lg"><RefreshCw size={18}/> Play Again</button>}
                          <button onClick={abandonGame} className="w-full px-8 py-3 bg-slate-100 text-slate-500 rounded-xl font-bold text-sm hover:bg-slate-200 transition-colors flex items-center justify-center gap-2"><LogOut size={18}/> Abandon Room</button>
@@ -549,7 +608,7 @@ export default function App() {
                 {game.winner && (
                    <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 backdrop-blur-sm rounded-xl animate-in fade-in">
                      <div className="text-center">
-                        <h2 className="text-3xl font-black text-indigo-600 mb-6">{game.winner === 'Host' ? game.hostName : game.guestName} WINS!</h2>
+                        <h2 className="text-3xl font-black text-indigo-600 mb-6">{getWinnerText()}</h2>
                         <div className="flex gap-3">
                           {getRematchState()[user.uid === game.host ? 'host' : 'guest'] ? <div className="px-6 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold animate-pulse">Waiting...</div> : <button onClick={handleRematch} className="px-6 py-3 bg-emerald-500 text-white rounded-xl font-bold shadow-lg hover:scale-105 transition-all flex gap-2"><RefreshCw/> Rematch</button>}
                           <button onClick={abandonGame} className="px-6 py-3 bg-slate-200 text-slate-600 rounded-xl font-bold hover:bg-slate-300">Exit</button>
@@ -591,12 +650,12 @@ export default function App() {
 
             {game?.type === 'tictactoe' && (
               <>
-               <div className="text-center font-bold text-slate-400 text-sm tracking-widest uppercase mb-4">{game.winner ? (game.winner === 'Draw' ? "Draw!" : `${game.winner === 'X' ? game.hostName : game.guestName} Wins!`) : `Turn: ${game.turn === 'host' ? 'X' : 'O'}`}</div>
+               <div className="text-center font-bold text-slate-400 text-sm tracking-widest uppercase mb-4">{game.winner ? getWinnerText() : `Turn: ${game.turn === 'host' ? 'X' : 'O'}`}</div>
                <div className="grid grid-cols-3 gap-3 bg-slate-100 p-3 rounded-2xl relative">
                  {game.winner && (
                     <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 backdrop-blur-sm rounded-2xl animate-in fade-in">
                         <div className="text-center space-y-4">
-                           <h2 className="text-4xl font-black text-slate-800 animate-bounce">{game.winner === 'Draw' ? 'DRAW' : 'WINNER!'}</h2>
+                           <h2 className="text-4xl font-black text-slate-800 animate-bounce">{getWinnerText()}</h2>
                            <div className="flex gap-2 justify-center">
                               {getRematchState()[user.uid === game.host ? 'host' : 'guest'] ? <div className="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg font-bold">Waiting...</div> : <button onClick={handleRematch} className="px-4 py-2 bg-emerald-500 text-white rounded-lg font-bold shadow-md hover:scale-105 transition-transform">Play Again</button>}
                               <button onClick={abandonGame} className="px-4 py-2 bg-slate-200 text-slate-600 rounded-lg font-bold hover:bg-slate-300">Exit</button>
@@ -619,7 +678,7 @@ export default function App() {
                  {game.winner && (
                     <div className="p-6 bg-white border-2 border-indigo-100 rounded-2xl text-center animate-in zoom-in">
                        <Trophy className="w-16 h-16 mx-auto text-yellow-400 mb-2"/>
-                       <h2 className="text-2xl font-black text-slate-800 mb-4">{game.winner === 'Host' ? game.hostName : game.guestName} WINS THE MATCH!</h2>
+                       <h2 className="text-2xl font-black text-slate-800 mb-4">{getWinnerText()}</h2>
                        <div className="flex gap-2 justify-center">
                           {getRematchState()[user.uid === game.host ? 'host' : 'guest'] ? <div className="px-6 py-3 bg-indigo-50 text-indigo-600 rounded-xl font-bold">Waiting for opponent...</div> : <button onClick={handleRematch} className="px-6 py-3 bg-emerald-500 text-white rounded-xl font-bold shadow-lg hover:scale-105 transition-transform">Start Rematch</button>}
                           <button onClick={abandonGame} className="px-6 py-3 bg-slate-100 text-slate-500 rounded-xl font-bold hover:bg-slate-200">Leave</button>
